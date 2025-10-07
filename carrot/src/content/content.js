@@ -4,12 +4,13 @@ const PREDICT_TEXT_ID = 'carrot-predict-text';
 const DISPLAY_NONE_CLS = 'carrot-display-none';
 
 const Unicode = {
-  BLACK_CURVED_RIGHTWARDS_AND_UPWARDS_ARROW: '\u2BAD',
-  GREEK_CAPITAL_DELTA: '\u0394',
-  GREEK_CAPITAL_PI: '\u03A0',
-  INFINITY: '\u221E',
-  SLANTED_NORTH_ARROW_WITH_HORIZONTAL_TAIL: '\u2B5C',
-  BACKSLANTED_SOUTH_ARROW_WITH_HORIZONTAL_TAIL: '\u2B5D',
+  BLACK_CURVED_RIGHTWARDS_AND_UPWARDS_ARROW: '\u2197', // ↗
+  GREEK_CAPITAL_DELTA: '\u0394', // Δ
+  GREEK_CAPITAL_PI: '\u03A0', // Π
+  INFINITY: '\u221E', // ∞
+  SLANTED_NORTH_ARROW_WITH_HORIZONTAL_TAIL: '\u2191', // ↑
+  BACKSLANTED_SOUTH_ARROW_WITH_HORIZONTAL_TAIL: '\u2193', // ↓
+  RIGHTWARDS_ARROW: '\u2192', // →,
 };
 
 const PREDICT_COLUMNS = [
@@ -207,11 +208,7 @@ function populateCells(row, type, rankUpTint, perfCell, deltaCell, rankUpCell) {
       if (row.rank.abbr === row.newRank.abbr) {  // No rank change
         rankUpCell.appendChild(makeGreySpan('N/C', 'No change'));
       } else {
-        const arrow =
-          row.delta > 0
-            ? Unicode.SLANTED_NORTH_ARROW_WITH_HORIZONTAL_TAIL
-            : Unicode.BACKSLANTED_SOUTH_ARROW_WITH_HORIZONTAL_TAIL;
-        rankUpCell.appendChild(makeFinalRankUpSpan(row.rank, row.newRank, arrow));
+        rankUpCell.appendChild(makeFinalRankUpSpan(row.rank, row.newRank, Unicode.RIGHTWARDS_ARROW));
       }
       break;
     case 'PREDICTED':
@@ -417,10 +414,10 @@ main();
 browser.runtime.onMessage.addListener((message) => {
   if (message.type === 'LIST_COLS') {
     return Promise.resolve(state);
-  } else if (message.type == 'UPDATE_COLS') {
+  } else if (message.type === 'UPDATE_COLS') {
     updateColumnVisibility(message.prefs);
     return Promise.resolve();
-  } else if (message.type = 'API_FETCH') {
+  } else if (message.type === 'API_FETCH') {
     return apiFetch(message.path, message.queryParamList);
   }
 });

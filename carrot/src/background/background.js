@@ -13,11 +13,11 @@ const DEBUG_FORCE_PREDICT = false;
 
 const UNRATED_HINTS = ['unrated', 'fools', 'q#', 'kotlin', 'marathon', 'teams'];
 const EDU_ROUND_RATED_THRESHOLD = 2100;
-
-const API = new Api(fetchFromContentScript);
-const CONTESTS = new Contests(API, LOCAL);
-const RATINGS = new Ratings(API, LOCAL);
-const CONTESTS_COMPLETE = new ContestsComplete(API, LOCAL);
+//
+// const API = new Api(fetchFromContentScript);
+// const CONTESTS = new Contests(API, LOCAL);
+// const RATINGS = new Ratings(API, LOCAL);
+// const CONTESTS_COMPLETE = new ContestsComplete(API, LOCAL);
 const TOP_LEVEL_CACHE = new TopLevelCache();
 
 /* ----------------------------------------------- */
@@ -27,17 +27,25 @@ const TOP_LEVEL_CACHE = new TopLevelCache();
 browser.runtime.onMessage.addListener((message, sender) => {
   let responsePromise;
   if (message.type === 'PREDICT') {
+    const tabId = sender?.tab?.id;
+    if (!tabId) {
+      return Promise.reject(new Error('No tab ID in sender'));
+    }
     console.info('Received message: %o', message);
-    responsePromise = getDeltas(message.contestId);
+    responsePromise = getDeltas(tabId, message.contestId);
   } else if (message.type === 'PING') {
+    const tabId = sender?.tab?.id;
     console.info('Received message: %o', message);
-    responsePromise = Promise.all([maybeUpdateContestList(), maybeUpdateRatings()]);
+    responsePromise = Promise.all([
+      maybeUpdateContestList(tabId),
+      maybeUpdateRatings(tabId)
+    ]);
   } else if (message.type === 'SET_ERROR_BADGE') {
     console.info('Received message: %o', message);
     setErrorBadge(sender);
     responsePromise = Promise.resolve();
   } else {
-    return;
+    return false;
   }
   return responsePromise.catch((e) => {
     console.error(e);
@@ -49,28 +57,36 @@ browser.runtime.onMessage.addListener((message, sender) => {
 /*   Content script fetch                          */
 /* ----------------------------------------------- */
 
-async function fetchFromContentScript(path, queryParamList) {
-  const tabs = await browser.tabs.query({
-    // This is the same as host permissions in the manifest
-    url: ['*://*.codeforces.com/*'],
-  });
+function createFetchForTab(tabId) {
+  return async function fetchFromContentScript(path, queryParamList) {
+    let tab = null;
+    if (tabId) {
+      try {
+        const maybeTab = await browser.tabs.get(tabId);
+        if (maybeTab?.url?.includes('codeforces.com')) {
+          tab = maybeTab;
+        }
+      } catch (_) {
+        // Tab closed or unavailable
+      }
+    }
 
-  if (tabs.length === 0) {
-    throw new Error('No Codeforces tab open :<');
+    // Fallback: find any active Codeforces tab
+    if (tab === null) {
+      const tabs = await browser.tabs.query({ url: ['*://*.codeforces.com/*'] });
+      if (tabs.length === 0) {
+        throw new Error('No Codeforces tab open :<');
+      }
+      tab = tabs.find(t => t.status === 'complete') ?? tabs[0];
+    }
+
+    const msg = {
+      type: 'API_FETCH',
+      path,
+      queryParamList,
+    };
+    return await browser.tabs.sendMessage(tab.id, msg);
   }
-
-  // Prefer a loaded tab
-  let tab = tabs.find(tab => tab.status === 'complete');
-  if (tab === undefined) {
-    tab = tabs[0];
-  }
-
-  const msg = {
-    type: 'API_FETCH',
-    path,
-    queryParamList,
-  };
-  return await browser.tabs.sendMessage(tab.id, msg);
 }
 
 /* ----------------------------------------------- */
@@ -86,23 +102,28 @@ function anyRowHasTeam(rows) {
   return rows.some((row) => row.party.teamId != null || row.party.teamName != null)
 }
 
-async function getDeltas(contestId) {
+async function getDeltas(tabId, contestId) {
   const prefs = await settings.getPrefs();
-  return TOP_LEVEL_CACHE.getOr(contestId, () => calcDeltas(contestId, prefs));
+  return TOP_LEVEL_CACHE.getOr(contestId, () => calcDeltas(tabId, contestId, prefs));
 }
 
-async function calcDeltas(contestId, prefs) {
+async function calcDeltas(tabId, contestId, prefs) {
+  const api = new Api(createFetchForTab(tabId));
+  const contests = new Contests(api, LOCAL);
+  const ratings = new Ratings(api, LOCAL);
+  const contestsComplete = new ContestsComplete(api, LOCAL);
+
   if (!prefs.enablePredictDeltas && !prefs.enableFinalDeltas) {
     return { result: 'DISABLED' };
   }
 
-  const contestBasic = await CONTESTS.getCached(contestId);
+  const contestBasic = await contests.getCached(contestId);
   if (contestBasic !== undefined && isUnratedByName(contestBasic.name)) {
     return { result: 'UNRATED_CONTEST' };
   }
 
-  const contest = await CONTESTS_COMPLETE.fetch(contestId);
-  await CONTESTS.update(contest.contest);
+  const contest = await contestsComplete.fetch(contestId);
+  await contests.update(contest.contest);
 
   if (contest.isRated === Contest.IsRated.NO) {
     return { result: 'UNRATED_CONTEST' };
@@ -132,7 +153,7 @@ async function calcDeltas(contestId, prefs) {
   return {
     result: 'OK',
     prefs,
-    predictResponse: await getPredicted(contest),
+    predictResponse: await getPredicted(contest, ratings),
   };
 }
 
@@ -167,8 +188,8 @@ function getFinal(contest) {
   return new PredictResponse(predictResults, PredictResponse.TYPE_FINAL, contest.fetchTime);
 }
 
-async function getPredicted(contest) {
-  const ratingMap = await RATINGS.fetchCurrentRatings(contest.contest.startTimeSeconds * 1000);
+async function getPredicted(contest, ratings) {
+  const ratingMap = await ratings.fetchCurrentRatings(contest.contest.startTimeSeconds * 1000);
   const isEduRound = contest.contest.name.toLowerCase().includes('educational');
   let rows = contest.rows;
   if (isEduRound) {
@@ -187,19 +208,24 @@ async function getPredicted(contest) {
 /*   Cache stuff                                   */
 /* ----------------------------------------------- */
 
-async function maybeUpdateContestList() {
+async function maybeUpdateContestList(tabId) {
   const prefs = await settings.getPrefs();
   if (!prefs.enablePredictDeltas && !prefs.enableFinalDeltas) {
     return;
   }
-  await CONTESTS.maybeRefreshCache();
+
+  if (tabId) {
+    const api = new Api(createFetchForTab(tabId));
+    const contests = new Contests(api, LOCAL);
+    await contests.maybeRefreshCache();
+  }
 }
 
-async function getNearestUpcomingRatedContestStartTime() {
+async function getNearestUpcomingRatedContestStartTime(contests) {
   let nearest = null;
   const now = Date.now();
-  const contests = await CONTESTS.list();
-  for (const c of contests) {
+  const contestList = await contests.list();
+  for (const c of contestList) {
     const start = (c.startTimeSeconds || 0) * 1000;
     if (start < now || isUnratedByName(c.name)) {
       continue;
@@ -211,14 +237,20 @@ async function getNearestUpcomingRatedContestStartTime() {
   return nearest;
 }
 
-async function maybeUpdateRatings() {
+async function maybeUpdateRatings(tabId) {
   const prefs = await settings.getPrefs();
   if (!prefs.enablePredictDeltas || !prefs.enablePrefetchRatings) {
     return;
   }
-  const startTimeMs = await getNearestUpcomingRatedContestStartTime();
-  if (startTimeMs !== null) {
-    await RATINGS.maybeRefreshCache(startTimeMs);
+
+  if (tabId) {
+    const api = new Api(createFetchForTab(tabId));
+    const contests = new Contests(api, LOCAL);
+    const ratings = new Ratings(api, LOCAL);
+    const startTimeMs = await getNearestUpcomingRatedContestStartTime(contests);
+    if (startTimeMs !== null) {
+      await ratings.maybeRefreshCache(startTimeMs);
+    }
   }
 }
 
